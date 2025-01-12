@@ -1,6 +1,12 @@
 # 🧟‍♂️ DeadText - Telegram Zombie Survival Game 🧟‍♀️
 
+<img src="/assets/deadtext.png" alt="DeadText Logo" width="250"/>
+
+![DeadText Demo](/assets/demo.gif)
+
 A text-based survival game where you must navigate through a zombie apocalypse using natural language commands. Make strategic decisions, manage resources, and try to survive for 30 days!
+
+Powered by [mistralai/mistral-nemo](https://mistral.ai/news/mistral-nemo/)
 
 ## 🎮 Features
 
@@ -69,6 +75,7 @@ pip install -r requirements.txt
 ```bash
 # Create .env file
 TELEGRAM_BOT_TOKEN=your_bot_token_here
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 ```
 
 4. Run the bot

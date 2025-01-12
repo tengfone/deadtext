@@ -63,48 +63,79 @@ class TelegramHandler:
         chat_id = update.effective_chat.id
         username = update.effective_user.first_name
 
-        print(
-            f"[TelegramHandler] Creating new game for user {username} with difficulty {difficulty}"
+        # Send initial loading message
+        loading_msg = await query.message.reply_text(
+            "⌛ *Creating your apocalypse survival story...*",
+            parse_mode="Markdown"
         )
 
-        # Show initial loading state
-        await query.edit_message_text("⌛ Creating your apocalyptic world...")
-        await asyncio.sleep(1)  # Short delay
+        try:
+            print(
+                f"[TelegramHandler] Creating new game for user {username} with difficulty {difficulty}"
+            )
 
-        # Show world generation progress
-        await query.edit_message_text("🌍 Generating world state...")
-        await asyncio.sleep(0.8)
+            # Create new game
+            player = self.state_manager.create_new_game(chat_id, username, difficulty)
+            print(
+                f"[TelegramHandler] Game created for user {username} with initial health={player.health}"
+            )
 
-        # Create new game
-        await query.edit_message_text("🎮 Initializing game state...")
-        player = self.state_manager.create_new_game(chat_id, username, difficulty)
-        print(
-            f"[TelegramHandler] Game created for user {username} with initial health={player.health}"
-        )
-        await asyncio.sleep(0.8)
+            # Prepare full player context
+            player_context = {
+                "health": player.health,
+                "food": player.food,
+                "water": player.water,
+                "weapons": player.weapons,
+                "inventory": player.inventory,
+                "location": player.location,
+                "current_day": player.current_day,
+                "difficulty": player.difficulty
+            }
 
-        # Generate initial scenario
-        await query.edit_message_text("📝 Generating your scenario...")
-        initial_scenario = await self.game_logic.scenario_generator.generate_scenario(
-            username=username,
-            day=1,
-            location="Safe House",
-            difficulty=difficulty,
-            context=player.__dict__,
-        )
+            # Generate initial scenario
+            initial_scenario = await self.game_logic.scenario_generator.generate_scenario(
+                username=username,
+                day=1,
+                location="Safe House",
+                difficulty=difficulty,
+                context=player_context,
+                message=loading_msg  # Pass the loading message instead of query.message
+            )
 
-        status_keyboard = [
-            [InlineKeyboardButton("📊 Status", callback_data="action_status")]
-        ]
+            # Clean up loading message
+            await loading_msg.delete()
 
-        await query.edit_message_text(
-            f"Game started! Difficulty: {difficulty}\n\n"
-            f"{initial_scenario}\n\n"
-            f"Health: {player.health} | Food: {player.food} | Water: {player.water}\n\n"
-            "What would you like to do? Describe your action...",
-            reply_markup=InlineKeyboardMarkup(status_keyboard),
-        )
-        return PLAYING
+            status_keyboard = [
+                [
+                    InlineKeyboardButton("📊 Status", callback_data="action_status"),
+                    InlineKeyboardButton("🎒 Inventory", callback_data="action_inventory")
+                ]
+            ]
+
+            # Send the game start message
+            await query.message.reply_text(
+                f"🎮 *Game Started!*\nDifficulty: _{difficulty}_\n\n"
+                f"{initial_scenario}\n\n"
+                f"❤️ Health: {player.health} | 🍗 Food: {player.food} | 💧 Water: {player.water}\n\n"
+                "_What would you like to do? Describe your action..._",
+                reply_markup=InlineKeyboardMarkup(status_keyboard),
+                parse_mode="Markdown"
+            )
+
+            # Delete the original difficulty selection message
+            await query.message.delete()
+            
+            return PLAYING
+
+        except Exception as e:
+            print(f"Error in difficulty_callback: {e}")
+            if loading_msg:
+                await loading_msg.delete()
+            await query.message.reply_text(
+                "❌ Sorry, there was an error starting your game. Please try again with /start",
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
 
     async def handle_text_input(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -113,12 +144,14 @@ class TelegramHandler:
         username = update.effective_user.first_name
 
         # Check rate limit before processing
-        is_allowed, remaining, reset_time = self.state_manager.db.check_rate_limit(chat_id)
+        is_allowed, remaining, reset_time = self.state_manager.db.check_rate_limit(
+            chat_id
+        )
         if not is_allowed:
             time_to_reset = reset_time - datetime.utcnow()
             hours = time_to_reset.seconds // 3600
             minutes = (time_to_reset.seconds % 3600) // 60
-            
+
             await update.message.reply_text(
                 f"❌ You've reached the daily message limit (50 messages).\n"
                 f"The limit will reset in {hours}h {minutes}m.\n"
@@ -137,11 +170,6 @@ class TelegramHandler:
             )
             return ConversationHandler.END
 
-        # Show loading state
-        loading_msg = await self.show_loading_message(
-            update.message, "⌛ Processing your action..."
-        )
-
         user_input = update.message.text
         current_scenario = context.user_data.get("current_scenario", "")
 
@@ -155,20 +183,28 @@ class TelegramHandler:
             "weapons": player.weapons,
             "day": player.current_day,
             "difficulty": player.difficulty,
+            "location": player.location,
+            "inventory": player.inventory
         }
+
+        # Show initial loading message
+        loading_msg = await update.message.reply_text(
+            "🤖 *Processing your action...*",
+            parse_mode="Markdown"
+        )
 
         try:
             # Let the LLM interpret the action
-            await loading_msg.edit_text("🤔 Interpreting your action...")
             action_result = await self.game_logic.scenario_generator.process_action(
                 username=username,
                 user_input=user_input,
                 current_scenario=current_scenario,
-                player_state=player_state
+                player_state=player_state,
+                message=loading_msg
             )
 
-            # Delete loading message
-            await loading_msg.delete()
+            if not action_result:
+                raise ValueError("Failed to process action")
 
             # Generate outcome using the game logic
             result = await self.game_logic.process_turn(
@@ -181,29 +217,37 @@ class TelegramHandler:
             # Store the new scenario for context
             context.user_data["current_scenario"] = result
 
+            # Clean up loading message after processing is complete
+            try:
+                await loading_msg.delete()
+            except Exception as e:
+                print(f"Error cleaning up loading message: {e}")
+
             # Check if game is still active
-            player = self.state_manager.get_player_state(
-                chat_id
-            )  # Refresh player state
+            player = self.state_manager.get_player_state(chat_id)  # Refresh player state
             if player and player.game_active:
                 # Add status keyboard
                 status_keyboard = [
                     [
-                        InlineKeyboardButton(
-                            "📊 Status", callback_data="action_status"
-                        ),
-                        InlineKeyboardButton(
-                            "🎒 Inventory", callback_data="action_inventory"
-                        ),
+                        InlineKeyboardButton("📊 Status", callback_data="action_status"),
+                        InlineKeyboardButton("🎒 Inventory", callback_data="action_inventory"),
                     ]
                 ]
 
                 # Make the prompt more open-ended
                 await update.message.reply_text(
-                    f"{result}\n\n" "What do you do next?",
+                    f"{result}\n\n" "_What do you do next?_",
                     reply_markup=InlineKeyboardMarkup(status_keyboard),
                     parse_mode="Markdown",
                 )
+
+                # If successful, notify user of remaining messages if running low
+                if remaining < 10:
+                    await update.message.reply_text(
+                        f"⚠️ You have {remaining} messages remaining today. The limit resets at midnight UTC.",
+                        parse_mode="Markdown"
+                    )
+
                 return PLAYING
             else:
                 print(
@@ -227,23 +271,24 @@ class TelegramHandler:
                 ]
                 await update.message.reply_text(
                     f"{result}\n\n{final_status}\n\n"
-                    "Your story has ended. Ready to survive again?",
+                    "_Your story has ended. Ready to survive again?_",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode="Markdown",
                 )
                 return ConversationHandler.END
 
-            # If successful, notify user of remaining messages if running low
-            if remaining < 10:
-                result += f"\n\n⚠️ You have {remaining} messages remaining today. The limit resets at midnight UTC."
-            
-            # Send the response...
-            
         except Exception as e:
             print(f"Error processing action: {e}")
-            await loading_msg.delete()
+            # Clean up loading message if there's an error
+            try:
+                if loading_msg:
+                    await loading_msg.delete()
+            except Exception as cleanup_error:
+                print(f"Error cleaning up loading message: {cleanup_error}")
+            
             await update.message.reply_text(
-                "Sorry, I had trouble processing that action. Please try again."
+                "❌ Sorry, I had trouble processing that action. Please try again.",
+                parse_mode="Markdown"
             )
             return PLAYING
 
@@ -282,7 +327,7 @@ class TelegramHandler:
             await query.message.reply_text(
                 status_text,
                 reply_markup=InlineKeyboardMarkup(status_keyboard),
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
 
         elif action == "inventory":
@@ -308,7 +353,7 @@ class TelegramHandler:
             await query.message.reply_text(
                 inventory_text,
                 reply_markup=InlineKeyboardMarkup(status_keyboard),
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
 
         return PLAYING
@@ -364,7 +409,9 @@ class TelegramHandler:
 
         await update.message.reply_text(status_text, parse_mode="Markdown")
 
-    async def inventory_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def inventory_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
         chat_id = update.effective_chat.id
         player = self.state_manager.get_player_state(chat_id)
 
@@ -397,22 +444,26 @@ class TelegramHandler:
 
     async def daily_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        is_allowed, remaining, reset_time = self.state_manager.db.check_rate_limit(chat_id)
-        
+        is_allowed, remaining, reset_time = self.state_manager.db.check_rate_limit(
+            chat_id
+        )
+
         time_to_reset = reset_time - datetime.utcnow()
         hours = time_to_reset.seconds // 3600
         minutes = (time_to_reset.seconds % 3600) // 60
-        
+
         daily_text = (
             f"📊 *Daily Message Status*\n\n"
             f"Messages Remaining: {remaining}/{GameConfig.MAX_MESSAGES_PER_DAY}\n"
             f"Reset in: {hours}h {minutes}m\n\n"
             f"_The limit resets at midnight UTC._"
         )
-        
+
         await update.message.reply_text(daily_text, parse_mode="Markdown")
 
-    async def location_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def location_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
         chat_id = update.effective_chat.id
         player = self.state_manager.get_player_state(chat_id)
 
@@ -447,10 +498,10 @@ class TelegramHandler:
                     FROM game_history 
                     WHERE chat_id = ?
                     """,
-                    (chat_id,)
+                    (chat_id,),
                 )
                 stats = cursor.fetchone()
-                
+
             if stats and stats[0] > 0:
                 stats_text = (
                     f"📊 *Survival Statistics*\n\n"
